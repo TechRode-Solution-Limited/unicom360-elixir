@@ -13,7 +13,8 @@ if Code.ensure_loaded?(Plug.Conn) do
 
       * `:secret` (required) - the 43-character string from the portal, or `{module, function,
         args}` called on each request. Prefer the tuple, so the secret is not compiled into your
-        router.
+        router. A value that is `nil`, empty or only whitespace makes `init/1` raise
+        `Unicom360.Error` (`:configuration_error`); a tuple that returns one answers 500 (below).
       * `:handler` (required) - a module implementing `Unicom360.Webhook.Handler`.
       * `:tolerance` - the largest clock skew accepted, in milliseconds. Default `300_000`.
 
@@ -23,7 +24,10 @@ if Code.ensure_loaded?(Plug.Conn) do
       * 401 with the failure's reason as the body, when verification fails;
       * 400 when the body cannot be read, or a verified body is not a JSON object with an event;
       * 413 when the body is over 1 MiB (only when this plug reads the body itself);
-      * 500 when the handler returns anything else.
+      * 500 when the handler returns anything else;
+      * 500, without reading the body or calling the handler, and with a log line, when an `{m, f,
+        a}` secret returns `nil`, an empty string or only whitespace: anyone can forge a signature
+        with an empty key, and it is a fault in your configuration, not a failed verification.
 
     ## The raw body
 
@@ -55,11 +59,7 @@ if Code.ensure_loaded?(Plug.Conn) do
     @spec init(keyword()) :: t()
     def init(opts) do
       opts = validate_keys!(opts)
-
-      if not valid_secret?(opts[:secret]) do
-        raise ArgumentError,
-              "Unicom360.Webhook.Plug needs :secret, a string or a {module, function, args} tuple"
-      end
+      check_secret!(opts[:secret])
 
       if not (is_atom(opts[:handler]) and not is_nil(opts[:handler])) do
         raise ArgumentError, "Unicom360.Webhook.Plug needs :handler, a module"
@@ -83,16 +83,27 @@ if Code.ensure_loaded?(Plug.Conn) do
     @impl true
     @spec call(Plug.Conn.t(), t()) :: Plug.Conn.t()
     def call(conn, %__MODULE__{} = opts) do
+      secret = secret(opts.secret)
+
+      case Webhook.check_secret(secret) do
+        :ok ->
+          receive_delivery(conn, secret, opts)
+
+        {:error, error} ->
+          Logger.error("Unicom360.Webhook.Plug: #{error.message}")
+          answer(conn, 500, "")
+      end
+    end
+
+    defp receive_delivery(conn, secret, opts) do
       case raw_body(conn) do
-        {:ok, body, conn} -> receive_event(conn, body, opts)
+        {:ok, body, conn} -> receive_event(conn, body, secret, opts)
         {:too_large, conn} -> answer(conn, 413, "body too large")
         :unreadable -> answer(conn, 400, "could not read the body")
       end
     end
 
-    defp receive_event(conn, body, opts) do
-      secret = secret(opts.secret)
-
+    defp receive_event(conn, body, secret, opts) do
       case Webhook.construct_event(body, conn.req_headers, secret, tolerance: opts.tolerance) do
         {:ok, event} ->
           case opts.handler.handle_event(event, conn) do
@@ -141,12 +152,22 @@ if Code.ensure_loaded?(Plug.Conn) do
     defp secret({module, function, args}), do: apply(module, function, args)
     defp secret(secret), do: secret
 
-    defp valid_secret?(secret) when is_binary(secret), do: secret != ""
+    # A secret known now fails now. An {m, f, a} is only known per request: call/2 checks it.
+    defp check_secret!({module, function, args})
+         when is_atom(module) and is_atom(function) and is_list(args),
+         do: :ok
 
-    defp valid_secret?({module, function, args}),
-      do: is_atom(module) and is_atom(function) and is_list(args)
+    defp check_secret!(secret) when is_binary(secret) or is_nil(secret) do
+      case Webhook.check_secret(secret) do
+        :ok -> :ok
+        {:error, error} -> raise error
+      end
+    end
 
-    defp valid_secret?(_secret), do: false
+    defp check_secret!(_secret) do
+      raise ArgumentError,
+            "Unicom360.Webhook.Plug: :secret must be a string or a {module, function, args} tuple"
+    end
 
     defimpl Inspect do
       def inspect(plug, _opts) do

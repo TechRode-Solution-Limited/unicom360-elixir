@@ -22,6 +22,10 @@ defmodule Unicom360.Webhook do
 
     * Deliveries are retried on any non-2xx (after 30 s, 2 min, 10 min, 30 min, 1 h, 3 h, 6 h
       and 12 h). Answer 2xx quickly and drop repeats by the event's `delivery_id`.
+    * A secret that is `nil`, empty or only whitespace (an unset environment variable, say) is a
+      `:configuration_error` before any other check, because anyone can forge a signature with
+      an empty key. That is a fault in your configuration, not a failed verification: answer 500,
+      not 401. Otherwise the secret is used exactly as given, never trimmed.
     * In `message.received`: a media caption arrives in `text`, not in `media`; `payload` is set
       only for location, contacts (`%{"contacts" => [...]}`), reaction, sticker and unsupported
       messages; an interactive or button reply has the chosen title in `text`, `payload` is
@@ -70,10 +74,33 @@ defmodule Unicom360.Webhook do
   `:tolerance` from `:now`, in either direction) or `:signature_mismatch`. The signature is
   compared in constant time.
 
+  A secret that is `nil`, empty or only whitespace returns
+  `{:error, %Unicom360.Error{type: :configuration_error}}`, with no `reason`, before any other
+  check: anyone can forge a signature with an empty key.
+
   `raw_body` must be the exact bytes received, before any JSON parsing.
   """
-  @spec verify(iodata(), headers(), String.t(), [option()]) :: :ok | {:error, Error.t()}
-  def verify(raw_body, headers, secret, opts \\ []) when is_binary(secret) do
+  @spec verify(iodata(), headers(), String.t() | nil, [option()]) :: :ok | {:error, Error.t()}
+  def verify(raw_body, headers, secret, opts \\ []) do
+    with :ok <- check_secret(secret) do
+      verify_signature(raw_body, headers, secret, opts)
+    end
+  end
+
+  @doc false
+  @spec check_secret(term()) :: :ok | {:error, Error.t()}
+  def check_secret(secret) do
+    if is_binary(secret) and String.trim(secret) != "" do
+      :ok
+    else
+      {:error,
+       Error.configuration(
+         "the webhook secret is empty or only whitespace: set it to the secret from the portal"
+       )}
+    end
+  end
+
+  defp verify_signature(raw_body, headers, secret, opts) do
     opts = verify_options!(opts)
     body = IO.iodata_to_binary(raw_body)
     signature = header(headers, "x-unicom360-signature")
@@ -113,7 +140,7 @@ defmodule Unicom360.Webhook do
   @doc """
   Like `verify/4`, but returns `:ok` or raises `Unicom360.Error`.
   """
-  @spec verify!(iodata(), headers(), String.t(), [option()]) :: :ok
+  @spec verify!(iodata(), headers(), String.t() | nil, [option()]) :: :ok
   def verify!(raw_body, headers, secret, opts \\ []) do
     case verify(raw_body, headers, secret, opts) do
       :ok -> :ok
@@ -128,9 +155,10 @@ defmodule Unicom360.Webhook do
   does not know (never an error).
 
   The event's `delivery_id` is the `X-Unicom360-Delivery` header: drop repeats by it. A verified
-  body that is not a JSON object with a string `event` is an error of type `:unicom360_error`.
+  body that is not a JSON object with a string `event` is an error of type `:unicom360_error`. A
+  secret that is `nil`, empty or only whitespace is a `:configuration_error`.
   """
-  @spec construct_event(iodata(), headers(), String.t(), [option()]) ::
+  @spec construct_event(iodata(), headers(), String.t() | nil, [option()]) ::
           {:ok, event()} | {:error, Error.t()}
   def construct_event(raw_body, headers, secret, opts \\ []) do
     body = IO.iodata_to_binary(raw_body)
@@ -148,7 +176,7 @@ defmodule Unicom360.Webhook do
   @doc """
   Like `construct_event/4`, but returns the event or raises `Unicom360.Error`.
   """
-  @spec construct_event!(iodata(), headers(), String.t(), [option()]) :: event()
+  @spec construct_event!(iodata(), headers(), String.t() | nil, [option()]) :: event()
   def construct_event!(raw_body, headers, secret, opts \\ []) do
     case construct_event(raw_body, headers, secret, opts) do
       {:ok, event} -> event

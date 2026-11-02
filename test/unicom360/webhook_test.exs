@@ -9,6 +9,7 @@ defmodule Unicom360.WebhookTest do
   # Throwaway test secret, not a credential.
   @secret "whsec_test_0123456789abcdefghijklmnopqrstuv"
   @body ~s({"created_at":"2026-10-24T09:30:00Z","data":{"message":"This is a test event."},"event":"webhook.test"})
+  @blank_secrets ["", " ", "   ", "\t", "\r\n", " \t\r\n "]
 
   defp signature(timestamp, body, secret \\ @secret) do
     "sha256=" <>
@@ -97,6 +98,74 @@ defmodule Unicom360.WebhookTest do
       assert_raise ArgumentError, fn ->
         Webhook.verify(@body, signed_headers(), @secret, nope: 1)
       end
+    end
+
+    # Anyone can compute this signature, so it must never verify.
+    for blank <- @blank_secrets do
+      test "the blank secret #{inspect(blank)} refuses a request signed with that key" do
+        blank = unquote(blank)
+        timestamp = System.os_time(:second)
+
+        headers = [
+          {"x-unicom360-signature", signature(timestamp, @body, blank)},
+          {"x-unicom360-timestamp", Integer.to_string(timestamp)}
+        ]
+
+        assert {:error, %Error{type: :configuration_error, reason: nil}} =
+                 Webhook.verify(@body, headers, blank)
+
+        assert {:error, %Error{type: :configuration_error}} =
+                 Webhook.construct_event(@body, headers, blank)
+
+        assert %Error{type: :configuration_error} =
+                 assert_raise(Error, fn -> Webhook.verify!(@body, headers, blank) end)
+
+        assert %Error{type: :configuration_error} =
+                 assert_raise(Error, fn -> Webhook.construct_event!(@body, headers, blank) end)
+      end
+
+      test "the blank secret #{inspect(blank)} is refused before any header check" do
+        blank = unquote(blank)
+
+        assert {:error, %Error{type: :configuration_error}} = Webhook.verify(@body, [], blank)
+
+        assert {:error, %Error{type: :configuration_error}} =
+                 Webhook.construct_event(@body, [], blank)
+      end
+    end
+
+    test "an unset secret is a configuration error" do
+      assert {:error, %Error{type: :configuration_error}} = Webhook.verify(@body, [], nil)
+
+      assert {:error, %Error{type: :configuration_error}} =
+               Webhook.construct_event(@body, [], nil)
+    end
+
+    test "the secret is used exactly as given, never trimmed" do
+      timestamp = System.os_time(:second)
+      padded = " #{@secret}\n"
+
+      headers = [
+        {"x-unicom360-signature", signature(timestamp, @body, padded)},
+        {"x-unicom360-timestamp", Integer.to_string(timestamp)}
+      ]
+
+      assert Webhook.verify(@body, headers, padded) == :ok
+
+      assert {:error, %Error{reason: :signature_mismatch}} =
+               Webhook.verify(@body, headers, @secret)
+    end
+
+    test "a secret that is not valid UTF-8 is not blank, and is used as given" do
+      bytes = <<0xFF, 0x20>>
+      timestamp = System.os_time(:second)
+
+      headers = [
+        {"x-unicom360-signature", signature(timestamp, @body, bytes)},
+        {"x-unicom360-timestamp", Integer.to_string(timestamp)}
+      ]
+
+      assert Webhook.verify(@body, headers, bytes) == :ok
     end
 
     test "the error names its class and never includes the secret" do
@@ -264,6 +333,42 @@ defmodule Unicom360.WebhookTest do
       assert conn.status == 200
     end
 
+    for blank <- [nil | @blank_secrets] do
+      test "an {m, f, a} secret returning #{inspect(blank)} answers 500 and never calls the handler" do
+        blank = unquote(blank)
+        timestamp = System.os_time(:second)
+        # Anyone can compute this signature, so it must never verify.
+        forged = signature(timestamp, @body, blank || "")
+
+        log =
+          ExUnit.CaptureLog.capture_log(fn ->
+            conn =
+              signed_conn(@body, [
+                {"x-unicom360-signature", forged},
+                {"x-unicom360-timestamp", Integer.to_string(timestamp)}
+              ])
+              |> call(secret: {SecretSource, :secret, [blank]})
+
+            assert conn.status == 500
+            assert conn.halted
+          end)
+
+        assert log =~ "webhook secret"
+        refute_received {:event, _event}
+      end
+    end
+
+    test "an {m, f, a} secret returning a blank value answers 500 whatever the body" do
+      ExUnit.CaptureLog.capture_log(fn ->
+        body = String.duplicate("x", 1_048_577)
+
+        conn =
+          signed_conn(body, signed_headers(body)) |> call(secret: {SecretSource, :secret, [""]})
+
+        assert conn.status == 500
+      end)
+    end
+
     test "uses conn.assigns.raw_body behind Plug.Parsers" do
       parsers =
         Plug.Parsers.init(
@@ -308,9 +413,7 @@ defmodule Unicom360.WebhookTest do
 
     test "init/1 refuses unusable options" do
       for opts <- [
-            [handler: Handler],
             [secret: @secret],
-            [secret: "", handler: Handler],
             [secret: :nope, handler: Handler],
             [secret: @secret, handler: "nope"],
             [secret: @secret, handler: Handler, tolerance: nil],
@@ -318,6 +421,20 @@ defmodule Unicom360.WebhookTest do
           ] do
         assert_raise ArgumentError, fn -> Webhook.Plug.init(opts) end
       end
+    end
+
+    for blank <- [nil | @blank_secrets] do
+      test "init/1 raises a configuration error for the secret #{inspect(blank)}" do
+        assert %Error{type: :configuration_error} =
+                 assert_raise(Error, fn ->
+                   Webhook.Plug.init(secret: unquote(blank), handler: Handler)
+                 end)
+      end
+    end
+
+    test "init/1 raises a configuration error for no secret at all" do
+      assert %Error{type: :configuration_error} =
+               assert_raise(Error, fn -> Webhook.Plug.init(handler: Handler) end)
     end
 
     test "a bad option's error never shows the secret" do

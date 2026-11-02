@@ -8,7 +8,7 @@ defmodule Unicom360.Error do
 
   | `type` | `class/1` | When |
   |---|---|---|
-  | `:configuration_error` | `ConfigurationError` | no API key, an unusable option |
+  | `:configuration_error` | `ConfigurationError` | no API key, an unusable option, a blank webhook secret |
   | `:connection_error` | `APIConnectionError` | no complete response (refused, DNS, reset) |
   | `:timeout_error` | `APITimeoutError` | the connection or the response timed out |
   | `:api_status_error` | `APIStatusError` | any other non-2xx (3xx, 403, 404...), or a 2xx that is not an envelope |

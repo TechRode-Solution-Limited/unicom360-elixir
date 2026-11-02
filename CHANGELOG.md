@@ -30,7 +30,10 @@ First release, targeting the Unicom360 API contract v0.1.0.
   backoff otherwise; the `auto_reference_ids` option.
 - Webhook verification and parsing (`Unicom360.Webhook.verify/4`, `construct_event/4`), the unsigned
   SMS and email delivery reports (`parse_sms_callback/1`, `parse_email_callback/1`), and the
-  optional Plug adapter (`Unicom360.Webhook.Plug`, `Unicom360.Webhook.BodyReader`).
+  optional Plug adapter (`Unicom360.Webhook.Plug`, `Unicom360.Webhook.BodyReader`). A secret that is
+  `nil`, empty or only whitespace is a `:configuration_error` before any other check, because anyone
+  can forge a signature with an empty key; the plug raises in `init/1` for a string, and answers 500
+  without calling the handler for an `{m, f, a}`.
 - Opt-in GSM-7 helpers (`Unicom360.GSM`).
 - Requests through Req with its retries and redirects off, a transport seam through `:plug` and
   `:req_options`, and `Unicom360.TransportError` for custom adapters.

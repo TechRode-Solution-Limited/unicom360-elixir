@@ -34,6 +34,10 @@ defmodule Unicom360.Examples.PhoenixWebhookController do
       {:error, %Unicom360.Error{type: :signature_verification_error, reason: reason}} ->
         send_resp(conn, 401, Atom.to_string(reason))
 
+      # The secret is blank: a fault on this server, not a bad delivery. Answers 500.
+      {:error, %Unicom360.Error{type: :configuration_error} = error} ->
+        raise error
+
       {:error, %Unicom360.Error{}} ->
         send_resp(conn, 400, "not a webhook event")
     end

@@ -262,7 +262,7 @@ went wrong:
 
 | `type` | `Unicom360.Error.class/1` | When |
 |---|---|---|
-| `:configuration_error` | `ConfigurationError` | no API key, an unusable option |
+| `:configuration_error` | `ConfigurationError` | no API key, an unusable option, a blank webhook secret |
 | `:connection_error` | `APIConnectionError` | no complete response (`cause` holds the exception) |
 | `:timeout_error` | `APITimeoutError` | the connection or the response timed out |
 | `:api_status_error` | `APIStatusError` | any other non-2xx, or a 2xx that is not an envelope |
@@ -396,10 +396,17 @@ end
 Headers can be a list of pairs (`conn.req_headers`) or a map; names are matched without regard to
 case. `opts` takes `:tolerance` (milliseconds, default `300_000`) and `:now` (Unix milliseconds).
 
+A secret that is `nil`, empty or only whitespace (an unset environment variable, say) returns
+`{:error, %Unicom360.Error{type: :configuration_error}}` before any other check, and the `!` variants
+raise it, because anyone can forge a signature with an empty key. That is a fault in your
+configuration, not a failed verification: answer 500, not 401.
+
 ### With the Plug adapter
 
 `Unicom360.Webhook.Plug` verifies, parses and calls your handler. It answers 401 on a verification
-failure, 200 after the handler returns `:ok`, and 500 otherwise:
+failure, 200 after the handler returns `:ok`, and 500 otherwise. A blank `:secret` string raises in
+`init/1`; a `{module, function, args}` secret that returns a blank value answers 500 and never calls
+your handler:
 
 ```elixir
 defmodule MyApp.WhatsAppEvents do
@@ -445,6 +452,10 @@ def whatsapp(conn, _params) do
 
     {:error, %Unicom360.Error{type: :signature_verification_error, reason: reason}} ->
       send_resp(conn, 401, Atom.to_string(reason))
+
+    # The secret is unset or blank: a fault on this server, not a bad delivery. Answers 500.
+    {:error, %Unicom360.Error{type: :configuration_error} = error} ->
+      raise error
 
     {:error, %Unicom360.Error{}} ->
       send_resp(conn, 400, "not a webhook event")
