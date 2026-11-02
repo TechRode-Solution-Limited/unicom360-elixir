@@ -1,0 +1,200 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  LANG: C.UTF-8
+  LC_ALL: C.UTF-8
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  lint:
+    name: Format, Credo, Dialyzer, docs (Elixir 1.19.4, OTP 28.2)
+    runs-on: ubuntu-latest
+    # The formatter's output differs between Elixir versions: check it on this one only.
+    container: hexpm/elixir:1.19.4-erlang-28.2-debian-bookworm-20260610-slim
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+          mix deps.get
+
+      - name: mix format
+        run: mix format --check-formatted
+
+      - name: Compile without warnings
+        run: mix compile --warnings-as-errors
+
+      - name: mix credo --strict
+        run: mix credo --strict
+
+      - name: Cache the Dialyzer PLTs
+        uses: actions/cache@v4
+        with:
+          path: priv/plts
+          key: plts-1.19.4-28.2-${{ hashFiles('mix.lock') }}
+          restore-keys: plts-1.19.4-28.2-
+
+      - name: mix dialyzer
+        run: mix dialyzer --format github
+
+      - name: Docs build without warnings
+        run: mix docs --warnings-as-errors
+
+      - name: No em dash characters
+        run: |
+          if grep -rn --exclude-dir=.git --exclude-dir=deps --exclude-dir=_build --exclude-dir=doc --exclude-dir=priv $'\xe2\x80\x94' . ; then
+            echo "Em dash characters found above: rewrite those sentences." >&2
+            exit 1
+          fi
+
+  test:
+    name: Tests (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Elixir 1.15, OTP 25
+            image: hexpm/elixir:1.15.8-erlang-25.3.2.21-debian-bookworm-20261027-slim
+          - name: Elixir 1.17, OTP 27
+            image: hexpm/elixir:1.17.3-erlang-27.3.4.19-debian-bookworm-20261027-slim
+          - name: Elixir 1.19.4, OTP 28.2
+            image: hexpm/elixir:1.19.4-erlang-28.2-debian-bookworm-20260610-slim
+    env:
+      MIX_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+          mix deps.get
+
+      - name: Compile the library and the examples without warnings
+        run: mix compile --warnings-as-errors
+
+      - name: Unit tests and the conformance suite
+        run: mix test
+
+  oldest-req:
+    name: Tests on the oldest Req allowed
+    runs-on: ubuntu-latest
+    container: hexpm/elixir:1.19.4-erlang-28.2-debian-bookworm-20260610-slim
+    env:
+      MIX_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve Req 0.5.0
+        run: |
+          sed -i 's/{:req, "~> 0.5"}/{:req, "== 0.5.0"}/' mix.exs
+          grep -q '{:req, "== 0.5.0"}' mix.exs
+          rm mix.lock
+          mix local.hex --force
+          mix local.rebar --force
+          mix deps.get
+
+      - name: Unit tests and the conformance suite
+        run: mix test
+
+  contract:
+    name: Contract (Prism mock of openapi.yaml)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the contract tag the fixtures were vendored from
+        id: contract
+        run: echo "tag=$(sed -n 's/^tag=//p' test/fixtures/conformance/VERSION)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: TechRode-Solution-Limited/unicom360-openapi
+          ref: ${{ steps.contract.outputs.tag }}
+          path: .openapi
+
+      - name: Start Prism
+        run: |
+          docker run -d --name prism -p 4010:4010 -v "$PWD/.openapi:/spec:ro" \
+            stoplight/prism:5 mock --multiprocess=false --errors -h 0.0.0.0 /spec/openapi.yaml
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:4010/health > /dev/null; then exit 0; fi
+            sleep 1
+          done
+          docker logs prism
+          exit 1
+
+      # In Prism's network namespace, so the base URL is the plain http on 127.0.0.1 that the
+      # client allows.
+      - name: Every operation against Prism
+        run: |
+          docker run --rm --network container:prism -v "$PWD:/src:ro" \
+            -e LANG=C.UTF-8 -e LC_ALL=C.UTF-8 -e MIX_ENV=test \
+            -e UNICOM360_CONTRACT_BASE_URL=http://127.0.0.1:4010 \
+            hexpm/elixir:1.19.4-erlang-28.2-debian-bookworm-20260610-slim \
+            sh -c 'cp -r /src /work && cd /work && mix local.hex --force && mix local.rebar --force && mix deps.get && mix test --only contract'
+
+  package:
+    name: Build and check the package
+    runs-on: ubuntu-latest
+    container: hexpm/elixir:1.19.4-erlang-28.2-debian-bookworm-20260610-slim
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+          mix deps.get
+
+      - name: mix hex.build
+        run: mix hex.build
+
+      - name: Fixtures, tests and examples stay out of the package
+        run: |
+          mix hex.build --unpack --output /tmp/unpacked
+          listing=$(cd /tmp/unpacked && find . -type f | sort)
+          echo "$listing"
+          if echo "$listing" | grep -E 'conformance|fixtures|^\./test|^\./examples|\.github'; then
+            echo "The package must not ship these files." >&2
+            exit 1
+          fi
+
+  secrets:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: No secrets in the history
+        run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.28.0 git /repo --no-banner --redact
+
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint the workflows
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 -color

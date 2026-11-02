@@ -1,0 +1,18 @@
+# Build output and dependencies
+/_build/
+/deps/
+/cover/
+/doc/
+*.ez
+*.tar
+/unicom360-*/
+erl_crash.dump
+
+# Dialyzer's local PLTs
+/priv/plts/
+
+# Editors and systems
+.elixir_ls/
+.idea/
+.vscode/
+.DS_Store

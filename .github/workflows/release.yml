@@ -1,0 +1,159 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  LANG: C.UTF-8
+  LC_ALL: C.UTF-8
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  check:
+    name: Check the tag and the CHANGELOG
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The tag matches the version in mix.exs and Unicom360.version/0
+        id: version
+        run: |
+          version=$(sed -n 's/^  @version "\(.*\)"$/\1/p' mix.exs)
+          code_version=$(sed -n 's/^  @version "\(.*\)"$/\1/p' lib/unicom360.ex)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match mix.exs version $version" >&2
+            exit 1
+          fi
+          if [ "$code_version" != "$version" ]; then
+            echo "Unicom360.version/0 is $code_version, mix.exs is $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: The CHANGELOG has a dated section for it
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if ! grep -Eq "^## \[${VERSION//./\\.}\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md; then
+            echo "CHANGELOG.md needs a dated '## [$VERSION] - YYYY-MM-DD' section" >&2
+            exit 1
+          fi
+
+  test:
+    name: Tests (${{ matrix.name }})
+    needs: check
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      matrix:
+        include:
+          - name: Elixir 1.15, OTP 25
+            image: hexpm/elixir:1.15.8-erlang-25.3.2.21-debian-bookworm-20261027-slim
+          - name: Elixir 1.17, OTP 27
+            image: hexpm/elixir:1.17.3-erlang-27.3.4.19-debian-bookworm-20261027-slim
+          - name: Elixir 1.19.4, OTP 28.2
+            image: hexpm/elixir:1.19.4-erlang-28.2-debian-bookworm-20260610-slim
+    env:
+      MIX_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+          mix deps.get
+
+      - name: Compile and test
+        run: |
+          mix compile --warnings-as-errors
+          mix test
+
+  lint:
+    name: Format, Credo and docs
+    needs: check
+    runs-on: ubuntu-latest
+    container: hexpm/elixir:1.19.4-erlang-28.2-debian-bookworm-20260610-slim
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+          mix deps.get
+
+      - name: Check
+        run: |
+          mix format --check-formatted
+          mix credo --strict
+          mix docs --warnings-as-errors
+
+  publish:
+    name: Publish to Hex
+    needs: [check, test, lint]
+    runs-on: ubuntu-latest
+    container: hexpm/elixir:1.19.4-erlang-28.2-debian-bookworm-20260610-slim
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+          mix deps.get
+
+      - name: Fixtures, tests and examples stay out of the package
+        run: |
+          mix hex.build --unpack --output /tmp/unpacked
+          listing=$(cd /tmp/unpacked && find . -type f | sort)
+          if echo "$listing" | grep -E 'conformance|fixtures|^\./test|^\./examples|\.github'; then
+            echo "The package must not ship these files." >&2
+            exit 1
+          fi
+
+      - name: mix hex.publish
+        env:
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+        run: |
+          if [ -z "$HEX_API_KEY" ]; then
+            echo "The HEX_API_KEY secret is not set on this repository" >&2
+            exit 1
+          fi
+          mix hex.publish --yes
+
+  github-release:
+    name: GitHub Release
+    needs: [check, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Release notes from the CHANGELOG section
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          awk -v version="$VERSION" '
+            index($0, "## [" version "]") == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found && /^\[[^]]+\]: / { next }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          test -s notes.md
+          cat notes.md
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md

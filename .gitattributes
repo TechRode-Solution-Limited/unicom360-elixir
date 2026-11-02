@@ -1,0 +1,5 @@
+* text=auto eol=lf
+
+# Vendored conformance fixtures: stored and checked out byte for byte, so the sha256 in
+# test/fixtures/conformance/VERSION keeps matching.
+test/fixtures/conformance/** -text

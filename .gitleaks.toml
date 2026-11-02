@@ -1,0 +1,12 @@
+title = "unicom360-elixir"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Throwaway webhook secrets in the conformance vectors and the tests that reuse them; not credentials"
+paths = [
+  '''^test/fixtures/conformance/''',
+  '''^test/unicom360/webhook_test\.exs$''',
+  '''^test/unicom360/examples_test\.exs$''',
+]
