@@ -60,7 +60,7 @@ defmodule Unicom360.TransportTest do
 
       assert Error.class(error) == "APITimeoutError"
       assert Error.connection_error?(error)
-      assert %Req.TransportError{reason: :timeout} = error.cause
+      assert %{__exception__: true, reason: :timeout} = error.cause
       assert attempts.() == 1
     end
 
@@ -179,7 +179,7 @@ defmodule Unicom360.TransportTest do
                Unicom360.SMS.send(client, @sms)
 
       assert_received {:slept, 0}
-      assert %Req.TransportError{reason: :econnrefused} = error.cause
+      assert %{__exception__: true, reason: :econnrefused} = error.cause
       assert error.message =~ "request failed"
     end
 
@@ -190,7 +190,7 @@ defmodule Unicom360.TransportTest do
       assert {:error, %Error{type: :timeout_error, attempts: 1} = error} =
                Unicom360.SMS.send(client, @sms, timeout: 50)
 
-      assert %Req.TransportError{reason: :timeout} = error.cause
+      assert %{__exception__: true, reason: :timeout} = error.cause
     end
 
     test "a connection closed before the response may have been sent: not retried" do
@@ -203,7 +203,7 @@ defmodule Unicom360.TransportTest do
       assert {:error, %Error{type: :connection_error, attempts: 1} = error} =
                Unicom360.SMS.send(real_client(port, []), @sms)
 
-      assert %Req.TransportError{reason: :closed} = error.cause
+      assert %{__exception__: true, reason: :closed} = error.cause
     end
 
     test "a real response goes through, with the headers on the wire" do
